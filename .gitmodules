@@ -1,0 +1,3 @@
+[submodule "src/external/seamless-interaction-playground"]
+	path = src/external/seamless-interaction-playground
+	url = git@github.com:HenryZhou7/seamless-interaction-playground.git
