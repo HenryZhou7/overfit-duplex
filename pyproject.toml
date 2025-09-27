@@ -4,4 +4,17 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "ipywidgets>=8.1.7",
+    "matplotlib>=3.10.6",
+    "pydantic>=2.11.9",
+    "seaborn>=0.13.2",
+    "seamless-interaction",
+    "torch>=2.8.0",
+    "torchaudio>=2.8.0",
+    "torchvision>=0.23.0",
+    "transformers>=4.56.2",
+]
+
+[tool.uv.sources]
+seamless-interaction = { path = "src/external/seamless-interaction-playground", editable = true }
