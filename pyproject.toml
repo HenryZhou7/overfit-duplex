@@ -11,7 +11,9 @@ dependencies = [
     "seaborn>=0.13.2",
     "seamless-interaction",
     "torch>=2.8.0",
+    "torchao>=0.13.0",
     "torchaudio>=2.8.0",
+    "torchtune>=0.6.1",
     "torchvision>=0.23.0",
     "transformers>=4.56.2",
 ]
