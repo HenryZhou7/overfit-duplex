@@ -8,6 +8,7 @@ dependencies = [
     "ipywidgets>=8.1.7",
     "matplotlib>=3.10.6",
     "pydantic>=2.11.9",
+    "python-dotenv>=1.1.1",
     "seaborn>=0.13.2",
     "seamless-interaction",
     "torch>=2.8.0",
