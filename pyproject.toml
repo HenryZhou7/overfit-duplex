@@ -21,3 +21,7 @@ dependencies = [
 
 [tool.uv.sources]
 seamless-interaction = { path = "src/external/seamless-interaction-playground", editable = true }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = true  # needed because packages like dataset_utils are namespace packages (no __init__.py)
