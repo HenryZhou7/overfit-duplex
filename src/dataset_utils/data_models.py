@@ -51,7 +51,7 @@ class Sample(BaseModel):
         return self
 
     def get_single_channel_audio(
-        self, rate: int, mask_transcript: bool = False
+        self, rate: int, mask_transcript: bool = False, return_tensors: bool = False
     ) -> np.ndarray:
         """Load the waveform resampled to the requested rate as a single channel."""
 
@@ -60,20 +60,14 @@ class Sample(BaseModel):
         if not self.wav_file.exists():
             raise FileNotFoundError(f"Audio file not found: {self.wav_file}")
 
-        waveform, original_rate = sf.read(
-            self.wav_file.as_posix(), dtype="float32", always_2d=False
-        )
+        waveform, original_rate = sf.read(self.wav_file.as_posix(), dtype="float32", always_2d=False)
 
         if waveform.ndim == 2:
             if waveform.shape[1] != 1:
-                raise ValueError(
-                    f"Expected mono audio, found {waveform.shape[1]} channels in {self.wav_file}"
-                )
+                raise ValueError(f"Expected mono audio, found {waveform.shape[1]} channels in {self.wav_file}")
             waveform = waveform[:, 0]
         elif waveform.ndim != 1:
-            raise ValueError(
-                f"Unexpected waveform shape {waveform.shape} in {self.wav_file}"
-            )
+            raise ValueError(f"Unexpected waveform shape {waveform.shape} in {self.wav_file}")
 
         if mask_transcript:
             if not self.json_file.exists():
@@ -93,7 +87,10 @@ class Sample(BaseModel):
             resampled = torchaudio.functional.resample(tensor, original_rate, rate)
             waveform = np.asarray(resampled.squeeze(0))
 
-        return waveform.astype(np.float32, copy=False)
+        if return_tensors:
+            return torch.from_numpy(waveform).float()
+        else:
+            return waveform.astype(np.float32, copy=False)
 
 
 class PairSample(BaseModel):
