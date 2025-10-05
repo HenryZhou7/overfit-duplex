@@ -21,6 +21,7 @@ dependencies = [
     "torchtune>=0.6.1",
     "torchvision>=0.23.0",
     "transformers>=4.56.2",
+    "typer>=0.19.2",
 ]
 
 [tool.uv.sources]
