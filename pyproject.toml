@@ -14,6 +14,7 @@ dependencies = [
     "seaborn>=0.13.2",
     "seamless-interaction",
     "snac>=1.2.1",
+    "tensorboardx>=2.6.4",
     "torch>=2.8.0",
     "torchao>=0.13.0",
     "torchaudio>=2.8.0",
@@ -28,3 +29,9 @@ seamless-interaction = { path = "src/external/seamless-interaction-playground", 
 [tool.setuptools.packages.find]
 where = ["src"]
 namespaces = true  # needed because packages like dataset_utils are namespace packages (no __init__.py)
+
+[tool.ruff.lint]
+ignore = ["F722"]
+
+[tool.ruff]
+line-length = 120  # or 140 if you prefer
