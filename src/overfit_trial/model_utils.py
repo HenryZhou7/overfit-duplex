@@ -4,7 +4,9 @@ Utility functions used in https://github.com/SesameAILabs/csm/blob/main/models.p
 
 import torchtune
 from torchtune.models import llama3_2
+import torch
 import torch.nn as nn
+from pathlib import Path
 import safetensors.torch
 
 
@@ -12,6 +14,7 @@ __all__ = [
     "prepare_transformer",
     "FLAVORS",
     "load_llama_weights",
+    "MLP",
 ]
 
 
@@ -37,7 +40,7 @@ def llama3_2_100M() -> torchtune.modules.transformer.TransformerDecoder:
         num_layers=4,
         num_heads=8,
         num_kv_heads=2,
-        embed_dim=1024,
+        embed_dim=2048,
         max_seq_len=2048,
         intermediate_dim=8192,
         attn_dropout=0.0,
@@ -64,7 +67,10 @@ def prepare_transformer(model):
 # Henry Custom Functions
 ############################################################
 MODEL_TO_TENSORPATH = {
-    "llama-1B": "$HOME/model_weights/Llama-3.2-1B-Instruct/model.safetensors",
+    "llama-1B": Path.home()
+    / "model_weights"
+    / "Llama-3.2-1B-Instruct"
+    / "model.safetensors",
 }
 
 
@@ -100,12 +106,89 @@ def convert_hf_to_torchtune(hf_state_dict):
     return torchtune_state_dict
 
 
-def load_llama_weights(model, model_id: str):
+def load_llama_weights(model_id: str):
     """
     Load the llama model weights from the downloaded tensors.
     """
-
+    model = FLAVORS[model_id]()
     hf_state_dict = safetensors.torch.load_file(MODEL_TO_TENSORPATH[model_id])
     torchtune_state_dict = convert_hf_to_torchtune(hf_state_dict)
     model.load_state_dict(torchtune_state_dict)
     return model
+
+
+class MLP(nn.Module):
+    """
+    General purpose Multi-Layer Perceptron.
+
+    Args:
+        layers: List of integers specifying the number of neurons in each layer
+                from input to output (e.g., [784, 256, 128, 10])
+        non_linear: Activation function to apply between layers
+        final_non_linear: Optional activation function to apply after the final layer
+        dropout: Dropout probability (0.0 means no dropout)
+        normalization: Whether to apply LayerNorm after each hidden layer
+    """
+
+    def __init__(
+        self,
+        layers: list[int],
+        non_linear: nn.Module,
+        final_non_linear: nn.Module | None = None,
+        dropout: float = 0.0,
+        normalization: bool = False,
+    ):
+        super().__init__()
+
+        if len(layers) < 2:
+            raise ValueError(
+                "layers must contain at least 2 elements (input and output)"
+            )
+
+        self.layers = nn.ModuleList()
+        self.norms = nn.ModuleList() if normalization else None
+        self.non_linear = non_linear
+        self.final_non_linear = final_non_linear
+        self.dropout = nn.Dropout(dropout) if dropout > 0.0 else None
+
+        # Build the network
+        for i in range(len(layers) - 1):
+            self.layers.append(nn.Linear(layers[i], layers[i + 1]))
+
+            # Add normalization for all layers except the last one
+            if normalization and i < len(layers) - 2:
+                self.norms.append(nn.LayerNorm(layers[i + 1]))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass through the MLP.
+
+        Args:
+            x: Input tensor of shape (batch_size, layers[0])
+
+        Returns:
+            Output tensor of shape (batch_size, layers[-1])
+        """
+        # Process all hidden layers
+        for i, layer in enumerate(self.layers[:-1]):
+            x = layer(x)
+
+            # Apply normalization if enabled
+            if self.norms is not None:
+                x = self.norms[i](x)
+
+            # Apply activation
+            x = self.non_linear(x)
+
+            # Apply dropout
+            if self.dropout is not None:
+                x = self.dropout(x)
+
+        # Process final layer
+        x = self.layers[-1](x)
+
+        # Apply final activation if specified
+        if self.final_non_linear is not None:
+            x = self.final_non_linear(x)
+
+        return x
