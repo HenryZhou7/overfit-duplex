@@ -67,10 +67,7 @@ def prepare_transformer(model):
 # Henry Custom Functions
 ############################################################
 MODEL_TO_TENSORPATH = {
-    "llama-1B": Path.home()
-    / "model_weights"
-    / "Llama-3.2-1B-Instruct"
-    / "model.safetensors",
+    "llama-1B": Path.home() / "model_weights" / "Llama-3.2-1B-Instruct" / "model.safetensors",
 }
 
 
@@ -114,6 +111,7 @@ def load_llama_weights(model_id: str):
     hf_state_dict = safetensors.torch.load_file(MODEL_TO_TENSORPATH[model_id])
     torchtune_state_dict = convert_hf_to_torchtune(hf_state_dict)
     model.load_state_dict(torchtune_state_dict)
+    print(f"Loaded {model_id} weights")
     return model
 
 
@@ -141,9 +139,7 @@ class MLP(nn.Module):
         super().__init__()
 
         if len(layers) < 2:
-            raise ValueError(
-                "layers must contain at least 2 elements (input and output)"
-            )
+            raise ValueError("layers must contain at least 2 elements (input and output)")
 
         self.layers = nn.ModuleList()
         self.norms = nn.ModuleList() if normalization else None

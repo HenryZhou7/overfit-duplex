@@ -4,11 +4,13 @@ Implementation of the model.
 # ruff: noqa: F722
 
 from __future__ import annotations
-
+import os
 import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from pathlib import Path
+from einops import rearrange
 
 from transformers import MimiModel
 from jaxtyping import Float
@@ -78,14 +80,12 @@ class TimeDependentLinear(nn.Module):
 
 
 class MachOverfitModel(nn.Module):
-    def __init__(self, num_quantizers: int = 8):
+    def __init__(self, num_quantizers: int = 8, mimi_audio_embed_dir: str = None):
         super().__init__()
 
         # Quantizer for audio embeddings
-        self._init_quantizer(num_quantizers)
-        self.num_quantizers = num_quantizers
-        self.code_num, self.code_dim = self.quantizer.acoustic_residual_vector_quantizer.layers[0].codebook.embed.shape
-        self.input_dim = self.code_dim
+        # self._init_mimi_quantizer(num_quantizers)
+        self._load_mimi_audio_embeddings(num_quantizers, mimi_audio_embed_dir)
 
         # Model
         self._init_backbone(MODEL_ID)
@@ -99,12 +99,43 @@ class MachOverfitModel(nn.Module):
         self.num_parameters = sum(p.numel() for p in self.parameters())
         print(f"Total number of parameters: {self.num_parameters:,}")
 
-    def _init_quantizer(self, num_quantizers: int):
+    def _load_mimi_audio_embeddings(self, num_quantizers: int, mimi_audio_embed_dir: str):
+        """ """
+        if mimi_audio_embed_dir is None:
+            if os.getcwd().endswith("overfit-duplex"):
+                mimi_audio_embed_file = Path(
+                    f"asset/mimi_audio_embeddings/mimi_projected_embeddings_{num_quantizers}q.pt"
+                )
+            else:
+                raise ValueError(
+                    "Mimi audio embeddings should be loaded from the asset directory. Not in the root directory."
+                )
+        else:
+            mimi_audio_embed_file = Path(f"{mimi_audio_embed_dir}/mimi_projected_embeddings_{num_quantizers}q.pt")
+
+        if not mimi_audio_embed_file.exists():
+            raise FileNotFoundError(f"Mimi audio embeddings file {mimi_audio_embed_file} not found")
+
+        audio_embed = torch.load(mimi_audio_embed_file)
+        self.num_quantizers, self.code_num, self.code_dim = audio_embed.shape
+        self.input_dim = self.code_dim
+
+        audio_embed = audio_embed.reshape(self.num_quantizers * self.code_num, self.code_dim)
+
+        self.register_buffer("audio_embed", audio_embed, persistent=False)
+
+    def _init_mimi_quantizer(self, num_quantizers: int):
         """
         Quantizer to convert the RVQ codes to dense features.
         """
         mimi_model = MimiModel.from_pretrained("kyutai/mimi", num_quantizers=num_quantizers)
         self.quantizer = mimi_model.quantizer
+        self.code_num = self.quantizer.acoustic_residual_vector_quantizer.layers[0].codebook.embed.shape[0]
+        self.code_dim = self.quantizer.acoustic_residual_vector_quantizer.output_proj.weight.shape[0]
+        self.num_quantizers = len(self.quantizer.acoustic_residual_vector_quantizer.layers) + len(
+            self.quantizer.semantic_residual_vector_quantizer.layers
+        )
+        self.input_dim = self.code_dim
         self.quantizer.eval()
 
     def _init_backbone(self, model_id: str):
@@ -123,7 +154,7 @@ class MachOverfitModel(nn.Module):
         # Head to project the transformer outputs to the semantic token logits.
         self.c0_head = nn.Linear(
             self.backbone.layers[-1].attn.embed_dim,
-            self.quantizer.semantic_residual_vector_quantizer.layers[0].codebook.codebook_size,
+            self.code_num,
         )
 
     def _init_decoder(self):
@@ -131,7 +162,9 @@ class MachOverfitModel(nn.Module):
         Decoder that takes the transformer outputs and predicts the RVQ codes.
         """
         self.decoder, embed_dim = prepare_transformer(FLAVORS["llama-100M"]())
-        self.audio_feat_proj = TimeDependentLinear(self.num_quantizers - 1, self.code_dim, embed_dim)
+        # Project all the code features to the input dimension of the decoder.
+        self.audio_feat_proj = TimeDependentLinear(self.num_quantizers, self.code_dim, embed_dim)
+        #
         self.audio_head_proj = TimeDependentLinear(self.num_quantizers - 1, embed_dim, self.code_num)
 
     def forward(self, codes_c1: torch.Tensor, codes_c2: torch.Tensor):
@@ -148,82 +181,50 @@ class MachOverfitModel(nn.Module):
         """
         bs = codes_c1.shape[0]
         T = codes_c1.shape[2]
-        latent_features: Float[torch.Tensor, "bs T embed_dim"] = self._embed_two_channel_audio_codes(codes_c1, codes_c2)
+        latent_feat_c1 = rearrange(self._embed_audio(codes_c1, collapse_quantizer_levels=True), "bs d t -> bs t d")
+        latent_feat_c2 = rearrange(self._embed_audio(codes_c2, collapse_quantizer_levels=True), "bs d t -> bs t d")
+        latent_features = torch.cat([latent_feat_c1, latent_feat_c2], dim=2)
 
+        # Project concatenated features to the backbone's embedding dim
+        latent_features = self.input_proj(latent_features)
         backbone_mask = self.causal_mask.unsqueeze(0).expand(bs, -1, -1)[:, :T, :T]
 
-        # backbone inference to get the c0 semantic token.
         transformer_outputs: Float[torch.Tensor, "bs T embed_dim"] = self.backbone(latent_features, mask=backbone_mask)
         c0_logit = self.c0_head(transformer_outputs)
 
         # Audio generation: from semantic tokens to acoustic tokens.
         ac_quantizers = self.num_quantizers - 1
-        leveled_audio_feats: Float[torch.Tensor, "total_frames num_quantizers embed_dim"] = (
-            self._embed_audio_quantizer_tokens(codes_c2)
-        )
-        leveled_audio_feats = self.audio_feat_proj(leveled_audio_feats)
-        total_frames = leveled_audio_feats.shape[0]
-        leveled_mask = self.causal_mask.unsqueeze(0).expand(total_frames, -1, -1)[:, :ac_quantizers, :ac_quantizers]
-        leveled_audio_feats = leveled_audio_feats[
-            :, : self.num_quantizers - 1, :
-        ]  # Need to decode the leveled audio tokens sequentially.
-        decoder_hidden_states: Float[torch.Tensor, "total_frames num_quantizers embed_dim"] = self.decoder(
-            leveled_audio_feats, mask=leveled_mask
-        )
-        audio_logits = self.audio_head_proj(decoder_hidden_states)
 
+        latent_quantizer_feats = self._embed_audio(codes_c2, collapse_quantizer_levels=False)  # [B, V, D, T]
+        latent_quantizer_feats = rearrange(latent_quantizer_feats, "b v d t -> b t v d")
+        latent_quantizer_feats = rearrange(latent_quantizer_feats, "b t v d -> (b t) v d")
+        latent_quantizer_feats = self.audio_feat_proj(latent_quantizer_feats)
+
+        total_frames = latent_quantizer_feats.shape[0]
+        leveled_mask = self.causal_mask.unsqueeze(0).expand(total_frames, -1, -1)[:, :ac_quantizers, :ac_quantizers]
+        leveled_audio_feats = latent_quantizer_feats[:, :ac_quantizers, :]
+        decoder_hidden_states = self.decoder(leveled_audio_feats, mask=leveled_mask)
+        audio_logits = self.audio_head_proj(decoder_hidden_states)
         return c0_logit, audio_logits
 
-    def _embed_two_channel_audio_codes(self, codes_c1: torch.Tensor, codes_c2: torch.Tensor):
+    def _embed_audio(self, codes: torch.Tensor, collapse_quantizer_levels: bool = False):
         """
-        Embed the audio codes into latent features.
-        """
-        with torch.no_grad():
-            c1_latent = self.quantizer.decode(codes_c1)
-            c2_latent = self.quantizer.decode(codes_c2)
-
-        # combine the two channels.
-        latent_features: Float[torch.Tensor, "bs D T"] = torch.cat([c1_latent, c2_latent], dim=1)
-        latent_features: Float[torch.Tensor, "bs T D"] = latent_features.transpose(1, 2)
-
-        # project to match the embedding dimension of the transformer
-        latent_features: Float[torch.Tensor, "bs T embed_dim"] = self.input_proj(latent_features)
-        return latent_features
-
-    def _embed_audio_quantizer_tokens(self, codes: torch.Tensor):
-        """
-        Embed the audio quantizer by each quantizer. The function preserves each
-        RVQ token's embedding without summing them up.
+        Embed the audio codes into latent features, collapsing the quantizer levels.
 
         Args:
-            codes: (bs, num_quantizers, num_frames)
+            codes: (B, V, T)
 
         Output:
-            latent: (bs, num_quantizers, num_frames, embed_dim)
+            feats: (B, V, D, T) if collapse_quantizer_levels is False, otherwise (B, D, T)
         """
-        num_ac_quantizers = self.num_quantizers - 1
-
-        # Obtain only the acoustic tokens
-        c2_tokens_ac: Float[torch.Tensor, "total_frames num_ac_quantizers"] = (
-            codes[:, 1:, :].transpose(1, 2).reshape(-1, num_ac_quantizers)
+        offsets = (torch.arange(self.num_quantizers, device=codes.device) * self.code_num).view(
+            1, self.num_quantizers, 1
         )
+        global_ids = codes + offsets
 
-        # Get semantic tokens
-        c2_tokens_semantic: Float[torch.Tensor, "total_frames 1"] = codes[:, 0, :].reshape(-1, 1)
-        c2_semantic_feats: Float[torch.Tensor, "total_frames 1 embed_dim"] = (
-            self.quantizer.semantic_residual_vector_quantizer.layers[0].codebook.decode(c2_tokens_semantic)
-        )
+        feats = F.embedding(global_ids, self.audio_embed)  # [B, V, T, D]
+        feats = rearrange(feats, "b v t d -> b v d t")
 
-        # Use the right codebook to obtain the dense audio features
-        audio_feats = [c2_semantic_feats]
-        for i in range(num_ac_quantizers):
-            feat_i = (
-                self.quantizer.acoustic_residual_vector_quantizer.layers[i]
-                .codebook.decode(c2_tokens_ac[:, i])
-                .unsqueeze(1)
-            )
-            audio_feats.append(feat_i)
-
-        audio_feats: Float[torch.Tensor, "total_frames num_quantizers embed_dim"] = torch.cat(audio_feats, dim=1)
-
-        return audio_feats
+        if collapse_quantizer_levels:
+            feats = torch.sum(feats, dim=1)
+        return feats
