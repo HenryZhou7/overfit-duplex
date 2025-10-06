@@ -208,7 +208,7 @@ class MachOverfitModel(nn.Module):
         leveled_audio_feats = latent_quantizer_feats[:, :ac_quantizers, :]
         decoder_hidden_states = self.decoder(leveled_audio_feats, mask=leveled_mask)
         audio_logits = self.audio_head_proj(decoder_hidden_states)
-        audio_logits = rearrange(audio_logits, "(b t) v c -> b v c t", b=bs)
+        audio_logits = rearrange(audio_logits, "(b t) v c -> b t v c", b=bs)
         return c0_logit, audio_logits
 
     def _causal_mask(self, T: int, device: torch.device):
