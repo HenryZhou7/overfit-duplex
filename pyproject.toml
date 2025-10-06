@@ -1,0 +1,38 @@
+[project]
+name = "overfit-duplex"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "beartype>=0.21.0",
+    "ipywidgets>=8.1.7",
+    "jaxtyping>=0.3.3",
+    "matplotlib>=3.10.6",
+    "pydantic>=2.11.9",
+    "python-dotenv>=1.1.1",
+    "seaborn>=0.13.2",
+    "seamless-interaction",
+    "snac>=1.2.1",
+    "tensorboardx>=2.6.4",
+    "torch>=2.8.0",
+    "torchao>=0.13.0",
+    "torchaudio>=2.8.0",
+    "torchtune>=0.6.1",
+    "torchvision>=0.23.0",
+    "transformers>=4.56.2",
+    "typer>=0.19.2",
+]
+
+[tool.uv.sources]
+seamless-interaction = { path = "src/external/seamless-interaction-playground", editable = true }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = true  # needed because packages like dataset_utils are namespace packages (no __init__.py)
+
+[tool.ruff.lint]
+ignore = ["F722"]
+
+[tool.ruff]
+line-length = 120  # or 140 if you prefer
