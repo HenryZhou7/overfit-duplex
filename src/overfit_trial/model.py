@@ -4,7 +4,6 @@ Implementation of the model.
 # ruff: noqa: F722
 
 from __future__ import annotations
-import os
 import math
 import torch
 import torch.nn as nn
@@ -80,7 +79,7 @@ class TimeDependentLinear(nn.Module):
 
 
 class MachOverfitModel(nn.Module):
-    def __init__(self, num_quantizers: int = 8, mimi_audio_embed_dir: str = None):
+    def __init__(self, num_quantizers: int = 32, mimi_audio_embed_dir: str = None):
         super().__init__()
 
         # Quantizer for audio embeddings
@@ -106,16 +105,12 @@ class MachOverfitModel(nn.Module):
         The flat audio embeddings are of shape: (num_quantizers * code_num, code_dim)
         """
         if mimi_audio_embed_dir is None:
-            if os.getcwd().endswith("overfit-duplex"):
-                mimi_audio_embed_file = Path(
-                    f"asset/mimi_audio_embeddings/mimi_projected_embeddings_{num_quantizers}q.pt"
-                )
-            else:
-                raise ValueError(
-                    "Mimi audio embeddings should be loaded from the asset directory. Not in the root directory."
-                )
+            project_root = Path(__file__).resolve().parents[2]
+            mimi_audio_embed_file = (
+                project_root / "asset" / "mimi_audio_embeddings" / (f"mimi_projected_embeddings_{num_quantizers}q.pt")
+            )
         else:
-            mimi_audio_embed_file = Path(f"{mimi_audio_embed_dir}/mimi_projected_embeddings_{num_quantizers}q.pt")
+            mimi_audio_embed_file = Path(mimi_audio_embed_dir) / f"mimi_projected_embeddings_{num_quantizers}q.pt"
 
         if not mimi_audio_embed_file.exists():
             raise FileNotFoundError(f"Mimi audio embeddings file {mimi_audio_embed_file} not found")
