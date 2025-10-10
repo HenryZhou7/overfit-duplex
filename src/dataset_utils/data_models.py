@@ -12,7 +12,7 @@ import torch
 import torchaudio
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from .data_postprocessing import apply_transcript_mask
+from dataset_utils.data_postprocessing import apply_transcript_mask
 
 
 class Sample(BaseModel):

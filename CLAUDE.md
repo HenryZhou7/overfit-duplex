@@ -19,4 +19,5 @@ tune download meta-llama/Llama-3.2-1B-Instruct --output-dir $HOME/model_weights/
 
 ## Coding Convention
 
-1. Assume the libraries are already included. No need to do `try - except` block on imports.
+- Assume the libraries are already included. No need to do `try - except` block on imports.
+- DO NOT use `syspath` to modify the Python path to import certain libraries. Always use absolute path import.

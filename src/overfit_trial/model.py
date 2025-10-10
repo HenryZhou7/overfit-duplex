@@ -4,7 +4,6 @@ Implementation of the model.
 # ruff: noqa: F722
 
 from __future__ import annotations
-import os
 import math
 import torch
 import torch.nn as nn
@@ -80,7 +79,7 @@ class TimeDependentLinear(nn.Module):
 
 
 class MachOverfitModel(nn.Module):
-    def __init__(self, num_quantizers: int = 8, mimi_audio_embed_dir: str = None):
+    def __init__(self, num_quantizers: int = 32, mimi_audio_embed_dir: str = None):
         super().__init__()
 
         # Quantizer for audio embeddings
@@ -100,18 +99,18 @@ class MachOverfitModel(nn.Module):
         print(f"Total number of parameters: {self.num_parameters:,}")
 
     def _load_mimi_audio_embeddings(self, num_quantizers: int, mimi_audio_embed_dir: str):
-        """ """
+        """
+        Load up the exported mimi quantized audio embeddings in flat.
+
+        The flat audio embeddings are of shape: (num_quantizers * code_num, code_dim)
+        """
         if mimi_audio_embed_dir is None:
-            if os.getcwd().endswith("overfit-duplex"):
-                mimi_audio_embed_file = Path(
-                    f"asset/mimi_audio_embeddings/mimi_projected_embeddings_{num_quantizers}q.pt"
-                )
-            else:
-                raise ValueError(
-                    "Mimi audio embeddings should be loaded from the asset directory. Not in the root directory."
-                )
+            project_root = Path(__file__).resolve().parents[2]
+            mimi_audio_embed_file = (
+                project_root / "asset" / "mimi_audio_embeddings" / (f"mimi_projected_embeddings_{num_quantizers}q.pt")
+            )
         else:
-            mimi_audio_embed_file = Path(f"{mimi_audio_embed_dir}/mimi_projected_embeddings_{num_quantizers}q.pt")
+            mimi_audio_embed_file = Path(mimi_audio_embed_dir) / f"mimi_projected_embeddings_{num_quantizers}q.pt"
 
         if not mimi_audio_embed_file.exists():
             raise FileNotFoundError(f"Mimi audio embeddings file {mimi_audio_embed_file} not found")
@@ -152,10 +151,7 @@ class MachOverfitModel(nn.Module):
         self.input_proj = nn.Linear(self.input_dim * 2, embed_dim)
 
         # Head to project the transformer outputs to the semantic token logits.
-        self.c0_head = nn.Linear(
-            self.backbone.layers[-1].attn.embed_dim,
-            self.code_num,
-        )
+        self.c0_head = nn.Linear(embed_dim, self.code_num)
 
     def _init_decoder(self):
         """
@@ -187,7 +183,7 @@ class MachOverfitModel(nn.Module):
 
         # Project concatenated features to the backbone's embedding dim
         latent_features = self.input_proj(latent_features)
-        backbone_mask = self.causal_mask.unsqueeze(0).expand(bs, -1, -1)[:, :T, :T]
+        backbone_mask = self._causal_mask(T, device=codes_c1.device).unsqueeze(0).expand(bs, -1, -1)
 
         transformer_outputs: Float[torch.Tensor, "bs T embed_dim"] = self.backbone(latent_features, mask=backbone_mask)
         c0_logit = self.c0_head(transformer_outputs)
@@ -201,11 +197,17 @@ class MachOverfitModel(nn.Module):
         latent_quantizer_feats = self.audio_feat_proj(latent_quantizer_feats)
 
         total_frames = latent_quantizer_feats.shape[0]
-        leveled_mask = self.causal_mask.unsqueeze(0).expand(total_frames, -1, -1)[:, :ac_quantizers, :ac_quantizers]
+        leveled_mask = (
+            self._causal_mask(ac_quantizers, device=codes_c1.device).unsqueeze(0).expand(total_frames, -1, -1)
+        )
         leveled_audio_feats = latent_quantizer_feats[:, :ac_quantizers, :]
         decoder_hidden_states = self.decoder(leveled_audio_feats, mask=leveled_mask)
         audio_logits = self.audio_head_proj(decoder_hidden_states)
+        audio_logits = rearrange(audio_logits, "(b t) v c -> b t v c", b=bs)
         return c0_logit, audio_logits
+
+    def _causal_mask(self, T: int, device: torch.device):
+        return self.causal_mask[:T, :T].to(device)
 
     def _embed_audio(self, codes: torch.Tensor, collapse_quantizer_levels: bool = False):
         """
@@ -217,6 +219,9 @@ class MachOverfitModel(nn.Module):
         Output:
             feats: (B, V, D, T) if collapse_quantizer_levels is False, otherwise (B, D, T)
         """
+        if codes.dtype != torch.long:
+            raise ValueError(f"Codes must be of type torch.long, got {codes.dtype}")
+
         offsets = (torch.arange(self.num_quantizers, device=codes.device) * self.code_num).view(
             1, self.num_quantizers, 1
         )
