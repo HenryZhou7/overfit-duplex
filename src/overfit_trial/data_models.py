@@ -1,4 +1,13 @@
-"""Pydantic data models for duplex audio conversations."""
+"""Pydantic data models for duplex audio conversations.
+
+Relationship of the different classes
+
+Conversation archive
+  → DuplexConversation → load_codes()
+    → DuplexCodes → .user/.assistant
+      → MimiChannelCodes → .window(frame_slice)
+        → WindowedChannelCodes.
+"""
 
 from __future__ import annotations
 
