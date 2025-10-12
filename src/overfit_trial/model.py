@@ -23,6 +23,36 @@ from overfit_trial.model_utils import (
 MODEL_ID = "llama-1B"
 
 
+def _multinomial_sample_one_no_sync(probs):
+    """Does multinomial sampling without a cuda synchronization."""
+    q = torch.empty_like(probs).exponential_(1)
+    return torch.argmax(probs / q, dim=-1, keepdim=True).to(dtype=torch.int)
+
+
+def sample_topk(logits: torch.Tensor, topk: int, temperature: float):
+    """
+    Sample from logits using top-k filtering with temperature scaling.
+
+    Args:
+        logits: (batch_size, vocab_size) tensor of logits
+        topk: Number of top tokens to consider
+        temperature: Temperature for scaling logits
+
+    Returns:
+        (batch_size, 1) tensor of sampled token indices
+    """
+    logits = logits / temperature
+
+    filter_value: float = -float("Inf")
+    indices_to_remove = logits < torch.topk(logits, topk)[0][..., -1, None]
+    scores_processed = logits.masked_fill(indices_to_remove, filter_value)
+    scores_processed = torch.nn.functional.log_softmax(scores_processed, dim=-1)
+    probs = torch.nn.functional.softmax(scores_processed, dim=-1)
+
+    sample_token = _multinomial_sample_one_no_sync(probs)
+    return sample_token
+
+
 def _create_causal_mask(seq_len: int, device: torch.device = torch.device("cpu")):
     return torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device))
 
@@ -208,6 +238,107 @@ class MachOverfitModel(nn.Module):
 
     def _causal_mask(self, T: int, device: torch.device):
         return self.causal_mask[:T, :T].to(device)
+
+    def generate_frame(
+        self,
+        codes_c1: torch.Tensor,
+        codes_c2: torch.Tensor,
+        temperature: float = 1.0,
+        topk: int = 50,
+    ) -> torch.Tensor:
+        """
+        Generate one frame of assistant audio codes given user and assistant history.
+
+        This method processes the full sequence history and generates the next frame
+        of assistant codes (semantic + acoustic) autoregressively.
+
+        Args:
+            codes_c1: (batch_size, num_quantizers, num_frames) - user audio codes
+            codes_c2: (batch_size, num_quantizers, num_frames) - assistant audio codes history
+            temperature: Temperature for sampling (default: 1.0)
+            topk: Number of top tokens to consider for sampling (default: 50)
+
+        Returns:
+            (batch_size, num_quantizers) - generated codes for one frame
+        """
+        bs = codes_c1.shape[0]
+        T = codes_c1.shape[2]
+        device = codes_c1.device
+
+        # Step 1: Process both channels through the backbone to get transformer outputs
+        latent_feat_c1 = rearrange(self._embed_audio(codes_c1, collapse_quantizer_levels=True), "bs d t -> bs t d")
+        latent_feat_c2 = rearrange(self._embed_audio(codes_c2, collapse_quantizer_levels=True), "bs d t -> bs t d")
+        latent_features = torch.cat([latent_feat_c1, latent_feat_c2], dim=2)
+
+        # Project concatenated features to the backbone's embedding dim
+        latent_features = self.input_proj(latent_features)
+        backbone_mask = self._causal_mask(T, device=device).unsqueeze(0).expand(bs, -1, -1)
+
+        # Get transformer outputs
+        transformer_outputs: Float[torch.Tensor, "bs T embed_dim"] = self.backbone(latent_features, mask=backbone_mask)
+
+        # Step 2: Sample semantic token (c0) from the last frame
+        last_h = transformer_outputs[:, -1, :]  # [bs, embed_dim]
+        c0_logits = self.c0_head(last_h)  # [bs, code_num]
+        c0_sample = sample_topk(c0_logits, topk, temperature)  # [bs, 1]
+
+        # Step 3: Autoregressively generate acoustic tokens (c1-c31) based on c0
+        generated_codes = [c0_sample]
+
+        # Create a new codes tensor for the frame we're generating
+        new_frame_codes = torch.zeros(bs, self.num_quantizers, 1, dtype=torch.long, device=device)
+        new_frame_codes[:, 0, 0] = c0_sample.squeeze(-1)
+
+        # Get embeddings for c0 to start acoustic generation
+        c0_embed = self._embed_single_quantizer(c0_sample, 0)  # [bs, 1, code_dim]
+
+        # Build up the sequence for decoder autoregressive generation
+        decoder_sequence = [c0_embed]
+
+        # Generate acoustic tokens autoregressively
+        for i in range(1, self.num_quantizers):
+            # Stack all embeddings collected so far
+            curr_embeds = torch.cat(decoder_sequence, dim=1)  # [bs, i, code_dim]
+
+            # Project through time-dependent linear for this quantizer level
+            curr_feats_proj = self.audio_feat_proj(curr_embeds)  # [bs, i, embed_dim]
+
+            # Create causal mask for current sequence length
+            curr_mask = self._causal_mask(i, device=device).unsqueeze(0).expand(bs, -1, -1)
+
+            # Process through decoder
+            decoder_hidden = self.decoder(curr_feats_proj, mask=curr_mask)  # [bs, i, embed_dim]
+
+            # Get logits for current quantizer level using the last hidden state
+            ci_logits = self.audio_head_proj.ith_forward(i - 1, decoder_hidden[:, -1, :])  # [bs, code_num]
+
+            # Sample token
+            ci_sample = sample_topk(ci_logits, topk, temperature)  # [bs, 1]
+            generated_codes.append(ci_sample)
+
+            # Add embedding to sequence for next iteration
+            ci_embed = self._embed_single_quantizer(ci_sample, i)  # [bs, 1, code_dim]
+            decoder_sequence.append(ci_embed)
+
+        # Concatenate all generated codes
+        generated_frame = torch.cat(generated_codes, dim=1)  # [bs, num_quantizers]
+        return generated_frame
+
+    def _embed_single_quantizer(self, codes: torch.Tensor, quantizer_idx: int):
+        """
+        Embed codes for a specific quantizer level.
+
+        Args:
+            codes: (batch_size, 1) tensor of codes
+            quantizer_idx: Index of the quantizer (0 to num_quantizers-1)
+
+        Returns:
+            (batch_size, 1, code_dim) tensor of embeddings
+        """
+        offset = quantizer_idx * self.code_num
+        global_ids = codes + offset
+        embeds = F.embedding(global_ids, self.audio_embed)  # [bs, 1, code_dim]
+        return embeds
 
     def _embed_audio(self, codes: torch.Tensor, collapse_quantizer_levels: bool = False):
         """
