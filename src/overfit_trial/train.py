@@ -1,8 +1,11 @@
 """
 Minimal training script to overfit a pre-trained Llama model on duplex conversation data.
+
+Command:
+    # under overfit-duplex
+    uv run python -m overfit_trial.train
 """
 
-from pathlib import Path
 from typing import Dict
 
 import torch
@@ -12,59 +15,21 @@ from tqdm import tqdm
 
 # Import factory modules
 from overfit_trial.data_factory import (
-    DataConfig,
     create_datasets,
     create_data_loaders,
-    create_default_data_config,
 )
 from overfit_trial.model_factory import (
-    ModelConfig,
     create_model,
     print_model_summary,
-    create_default_model_config,
 )
 from overfit_trial.loss_factory import (
-    LossConfig,
     calculate_losses,
-    create_default_loss_config,
 )
 from overfit_trial.optimizer_factory import (
-    OptimizerConfig,
     create_optimizer,
     apply_gradient_clipping,
-    create_default_optimizer_config,
 )
-
-
-class TrainingConfig:
-    """Main training configuration."""
-
-    def __init__(
-        self,
-        num_updates: int = 10000,
-        log_interval: int = 10,
-        eval_interval: int = 100,
-        checkpoint_interval: int = 500,
-        checkpoint_dir: Path = Path("checkpoints/overfit_trial"),
-        tensorboard_dir: Path = Path("runs/overfit_trial"),
-        # Sub-configurations
-        data_config: DataConfig = None,
-        model_config: ModelConfig = None,
-        loss_config: LossConfig = None,
-        optimizer_config: OptimizerConfig = None,
-    ):
-        self.num_updates = num_updates
-        self.log_interval = log_interval
-        self.eval_interval = eval_interval
-        self.checkpoint_interval = checkpoint_interval
-        self.checkpoint_dir = checkpoint_dir
-        self.tensorboard_dir = tensorboard_dir
-
-        # Initialize sub-configurations with defaults if not provided
-        self.data_config = data_config or create_default_data_config()
-        self.model_config = model_config or create_default_model_config()
-        self.loss_config = loss_config or create_default_loss_config()
-        self.optimizer_config = optimizer_config or create_default_optimizer_config()
+from overfit_trial.training_config import TrainingConfig
 
 
 def train_step(
