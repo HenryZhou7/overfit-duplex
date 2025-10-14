@@ -9,9 +9,17 @@ autoregressively generates assistant responses frame-by-frame without caching.
 from typing import Optional, Tuple
 import torch
 import numpy as np
+from tqdm import tqdm
 from transformers import MimiModel, AutoFeatureExtractor
 
 from overfit_trial.model import MachOverfitModel
+
+MIMI_CODE_RATE = 12.5
+MIMI_SAMPLE_RATE = 24000
+
+
+def mimi_latent2time_frame(num_codes: int) -> int:
+    return int(num_codes / MIMI_CODE_RATE * MIMI_SAMPLE_RATE)
 
 
 class SlidingDuplexModelInference:
@@ -56,7 +64,7 @@ class SlidingDuplexModelInference:
     def _init_mimi_model(self):
         """Initialize Mimi model for encoding/decoding."""
         self.mimi_model = MimiModel.from_pretrained("kyutai/mimi", num_quantizers=self.num_quantizers)
-        self.mimi_model.to(self.device)
+        self.mimi_model.to("cpu")
         self.mimi_model.eval()
 
         # Also initialize the feature extractor for potential audio preprocessing
@@ -79,7 +87,7 @@ class SlidingDuplexModelInference:
         num_samples = int(sample_rate * duration_seconds)
 
         # Generate silence audio
-        silence_audio = torch.zeros(1, 1, num_samples, device=self.device)
+        silence_audio = torch.zeros(1, 1, num_samples, device="cpu")
 
         with torch.no_grad():
             silence_encoded = self.mimi_model.encode(silence_audio)
@@ -103,7 +111,7 @@ class SlidingDuplexModelInference:
         Args:
             checkpoint_path: Path to model checkpoint file
         """
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
 
         if "model_state_dict" in checkpoint:
             self.model.load_state_dict(checkpoint["model_state_dict"])
@@ -165,14 +173,33 @@ class SlidingDuplexModelInference:
         Returns:
             (num_quantizers, num_steps) - generated assistant audio codes
         """
-        # TODO: Implement the sliding window generation logic
-        # This function should:
-        # 1. Generate silence codes dynamically based on input shape
-        # 2. Process user codes with a sliding window
-        # 3. Generate assistant codes frame-by-frame during warmup (silence)
-        # 4. After warmup, use model.generate_frame() for autoregressive generation
-        # 5. Store generated codes in self.last_generated_codes for potential decoding
-        raise NotImplementedError("The generate function is to be implemented")
+        # Get the warmup sil codes
+        sil_codes = self._generate_silence_codes(warmup_frames)
+        assert sil_codes.shape[1] == warmup_frames
+
+        idx = start_frame + warmup_frames
+        user_codes_i = user_codes[:, start_frame : start_frame + warmup_frames].unsqueeze(0).to(self.device)
+        assistant_codes_i = sil_codes.unsqueeze(0).to(self.device)  # shape: (1, num_quantizers, warmup_frames)
+
+        for i in tqdm(range(num_steps), desc=f"Generating frames by {num_steps} steps"):
+            # shape: (1, num_quantizers)
+            new_frame = self.model.generate_frame(user_codes_i, assistant_codes_i, temperature, topk)
+
+            idx += 1
+            assistant_codes_i = torch.cat([assistant_codes_i, new_frame.unsqueeze(-1)], dim=2)
+            user_codes_i = torch.cat([user_codes_i, user_codes[:, idx : idx + 1].unsqueeze(0)], dim=2)
+
+            if user_codes_i.shape[2] > self.model.backbone.max_seq_len:
+                user_codes_i = user_codes_i[:, :, -self.model.max_seq_len :]
+                assistant_codes_i = assistant_codes_i[:, :, -self.model.max_seq_len :]
+
+            if self.last_generated_codes is None:
+                self.last_generated_codes = new_frame.unsqueeze(-1)
+            else:
+                self.last_generated_codes = torch.cat([self.last_generated_codes, new_frame.unsqueeze(-1)], dim=2)
+
+        # shape: (1, num_quantizers, num_steps)
+        return self.last_generated_codes
 
     def generate_with_audio(self, user_codes: torch.Tensor, **kwargs) -> Tuple[torch.Tensor, np.ndarray]:
         """

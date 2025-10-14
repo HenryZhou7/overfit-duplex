@@ -189,7 +189,7 @@ class MachOverfitModel(nn.Module):
         """
         self.decoder, embed_dim = prepare_transformer(FLAVORS["llama-100M"]())
         # Project all the code features to the input dimension of the decoder.
-        self.audio_feat_proj = TimeDependentLinear(self.num_quantizers, self.code_dim, embed_dim)
+        self.audio_feat_embed = nn.Linear(self.code_dim, embed_dim)
         #
         self.audio_head_proj = TimeDependentLinear(self.num_quantizers - 1, embed_dim, self.code_num)
 
@@ -212,19 +212,22 @@ class MachOverfitModel(nn.Module):
         latent_features = torch.cat([latent_feat_c1, latent_feat_c2], dim=2)
 
         # Project concatenated features to the backbone's embedding dim
-        latent_features = self.input_proj(latent_features)
+        latent_features = self.input_proj(latent_features)  # [bs, T, embed_dim]
         backbone_mask = self._causal_mask(T, device=codes_c1.device).unsqueeze(0).expand(bs, -1, -1)
 
-        transformer_outputs: Float[torch.Tensor, "bs T embed_dim"] = self.backbone(latent_features, mask=backbone_mask)
-        c0_logit = self.c0_head(transformer_outputs)
+        backbone_h: Float[torch.Tensor, "bs T embed_dim"] = self.backbone(latent_features, mask=backbone_mask)
+        c0_logit = self.c0_head(backbone_h)
 
         # Audio generation: from semantic tokens to acoustic tokens.
         ac_quantizers = self.num_quantizers - 1
 
         latent_quantizer_feats = self._embed_audio(codes_c2, collapse_quantizer_levels=False)  # [B, V, D, T]
         latent_quantizer_feats = rearrange(latent_quantizer_feats, "b v d t -> b t v d")
+        latent_quantizer_feats = self.audio_feat_embed(latent_quantizer_feats)  # [b t v embed_dim]
+        latent_quantizer_feats[:, :, 0, :] = backbone_h
         latent_quantizer_feats = rearrange(latent_quantizer_feats, "b t v d -> (b t) v d")
-        latent_quantizer_feats = self.audio_feat_proj(latent_quantizer_feats)
+        # latent_quantizer_feats = self.audio_feat_proj(latent_quantizer_feats)
+        # latent_quantizer_feats[:, :, 0, :] = backbone_h
 
         total_frames = latent_quantizer_feats.shape[0]
         leveled_mask = (
@@ -282,45 +285,37 @@ class MachOverfitModel(nn.Module):
         c0_logits = self.c0_head(last_h)  # [bs, code_num]
         c0_sample = sample_topk(c0_logits, topk, temperature)  # [bs, 1]
 
-        # Step 3: Autoregressively generate acoustic tokens (c1-c31) based on c0
+        # Step 3: Autoregressively generate acoustic tokens (c1..), using last_h as the first decoder token
         generated_codes = [c0_sample]
 
-        # Create a new codes tensor for the frame we're generating
-        new_frame_codes = torch.zeros(bs, self.num_quantizers, 1, dtype=torch.long, device=device)
-        new_frame_codes[:, 0, 0] = c0_sample.squeeze(-1)
-
-        # Get embeddings for c0 to start acoustic generation
-        c0_embed = self._embed_single_quantizer(c0_sample, 0)  # [bs, 1, code_dim]
-
-        # Build up the sequence for decoder autoregressive generation
-        decoder_sequence = [c0_embed]
+        # Decoder input sequence lives in the decoder embed space.
+        # Start with the semantic-conditioned state from the backbone, not the c0 embedding.
+        decoder_sequence_emb = [last_h.unsqueeze(1)]  # [bs, 1, embed_dim]
 
         # Generate acoustic tokens autoregressively
         for i in range(1, self.num_quantizers):
-            # Stack all embeddings collected so far
-            curr_embeds = torch.cat(decoder_sequence, dim=1)  # [bs, i, code_dim]
+            # Current sequence in decoder embed space
+            curr_feats_proj = torch.cat(decoder_sequence_emb, dim=1)  # [bs, i, embed_dim]
 
-            # Project through time-dependent linear for this quantizer level
-            curr_feats_proj = self.audio_feat_proj(curr_embeds)  # [bs, i, embed_dim]
-
-            # Create causal mask for current sequence length
+            # Causal mask for current sequence length
             curr_mask = self._causal_mask(i, device=device).unsqueeze(0).expand(bs, -1, -1)
 
             # Process through decoder
             decoder_hidden = self.decoder(curr_feats_proj, mask=curr_mask)  # [bs, i, embed_dim]
 
-            # Get logits for current quantizer level using the last hidden state
+            # Logits for current quantizer level (i-1 maps to acoustic level index)
             ci_logits = self.audio_head_proj.ith_forward(i - 1, decoder_hidden[:, -1, :])  # [bs, code_num]
 
-            # Sample token
+            # Sample token and save it
             ci_sample = sample_topk(ci_logits, topk, temperature)  # [bs, 1]
             generated_codes.append(ci_sample)
 
-            # Add embedding to sequence for next iteration
-            ci_embed = self._embed_single_quantizer(ci_sample, i)  # [bs, 1, code_dim]
-            decoder_sequence.append(ci_embed)
+            # Embed sampled code and project to decoder embed space for next step
+            ci_embed_code = self._embed_single_quantizer(ci_sample, i)  # [bs, 1, code_dim]
+            ci_embed_proj = self.audio_feat_embed(ci_embed_code)  # [bs, 1, embed_dim]
+            decoder_sequence_emb.append(ci_embed_proj)
 
-        # Concatenate all generated codes
+        # Concatenate all generated codes in order [c0, c1, ..., c_{V-1}]
         generated_frame = torch.cat(generated_codes, dim=1)  # [bs, num_quantizers]
         return generated_frame
 
