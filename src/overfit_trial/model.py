@@ -221,6 +221,7 @@ class MachOverfitModel(nn.Module):
         # Audio generation: from semantic tokens to acoustic tokens.
         ac_quantizers = self.num_quantizers - 1
 
+        # TODO: csm is actually contioning on the c0 token features.
         latent_quantizer_feats = self._embed_audio(codes_c2, collapse_quantizer_levels=False)  # [B, V, D, T]
         latent_quantizer_feats = rearrange(latent_quantizer_feats, "b v d t -> b t v d")
         latent_quantizer_feats = self.audio_feat_embed(latent_quantizer_feats)  # [b t v embed_dim]
