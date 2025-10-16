@@ -31,10 +31,10 @@ class TrainingConfig:
 
     def __init__(
         self,
-        num_updates: int = 1000,
+        num_updates: int = 800,
         log_interval: int = 10,
         eval_interval: int = 100,
-        checkpoint_interval: int = 500,
+        checkpoint_interval: int = 200,
         checkpoint_dir: Path = Path("checkpoints/overfit_trial"),
         tensorboard_dir: Path = Path("runs/overfit_trial"),
         # Sub-configurations
