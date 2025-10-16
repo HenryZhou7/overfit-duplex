@@ -177,6 +177,7 @@ class SlidingDuplexModelInference:
         sil_codes = self._generate_silence_codes(warmup_frames)
         assert sil_codes.shape[1] == warmup_frames
 
+        # Start generating the next frame at the current index
         idx = start_frame + warmup_frames
         user_codes_i = user_codes[:, start_frame : start_frame + warmup_frames].unsqueeze(0).to(self.device)
         assistant_codes_i = sil_codes.unsqueeze(0).to(self.device)  # shape: (1, num_quantizers, warmup_frames)
@@ -185,13 +186,16 @@ class SlidingDuplexModelInference:
             # shape: (1, num_quantizers)
             new_frame = self.model.generate_frame(user_codes_i, assistant_codes_i, temperature, topk)
 
-            idx += 1
+            # Append the assistant frame for the current time index first
             assistant_codes_i = torch.cat([assistant_codes_i, new_frame.unsqueeze(-1)], dim=2)
+            # Then append the user frame at the same time index (align contexts)
             user_codes_i = torch.cat([user_codes_i, user_codes[:, idx : idx + 1].unsqueeze(0)], dim=2)
+            # Move to the next time index
+            idx += 1
 
             if user_codes_i.shape[2] > self.model.backbone.max_seq_len:
-                user_codes_i = user_codes_i[:, :, -self.model.max_seq_len :]
-                assistant_codes_i = assistant_codes_i[:, :, -self.model.max_seq_len :]
+                user_codes_i = user_codes_i[:, :, -self.model.backbone.max_seq_len :]
+                assistant_codes_i = assistant_codes_i[:, :, -self.model.backbone.max_seq_len :]
 
             if self.last_generated_codes is None:
                 self.last_generated_codes = new_frame.unsqueeze(-1)
