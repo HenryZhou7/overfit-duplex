@@ -63,12 +63,12 @@ def compute_acoustic_loss(
     num_quantizers: int,
 ) -> torch.Tensor:
     """
-    Compute cross-entropy loss for acoustic tokens.
+    Compute cross-entropy loss for acoustic tokens at the same time step.
 
     Args:
-        audio_logits: Predicted logits of shape (batch_size, seq_len-1, num_quantizers-1, vocab_size)
-        acoustic_targets: Target tokens of shape (batch_size, seq_len-1, num_quantizers-1)
-        mask: Boolean mask of shape (batch_size, seq_len-1)
+        audio_logits: Predicted logits of shape (batch_size, seq_len, num_quantizers-1, vocab_size)
+        acoustic_targets: Target tokens of shape (batch_size, seq_len, num_quantizers-1)
+        mask: Boolean mask of shape (batch_size, seq_len)
         num_quantizers: Total number of quantizers
 
     Returns:
@@ -134,18 +134,17 @@ def calculate_losses(
     mask = torch.arange(seq_len, device=target_codes.device).expand(batch_size, seq_len)
     mask = mask < lengths.unsqueeze(1)  # (batch_size, seq_len)
 
-    # Shift for next-token prediction (teacher forcing)
+    # Shift for next-token prediction (teacher forcing) for semantic tokens only.
     semantic_logits_shifted = c0_logit[:, :-1, :]  # (batch_size, seq_len-1, vocab_size)
     semantic_targets_shifted = semantic_targets[:, 1:]  # (batch_size, seq_len-1)
     mask_shifted = mask[:, 1:]  # (batch_size, seq_len-1)
 
-    audio_logits_shifted = audio_logits[:, :-1, :, :]  # (batch_size, seq_len-1, num_quantizers-1, vocab_size)
-    acoustic_targets_shifted = acoustic_targets[:, 1:, :]  # (batch_size, seq_len-1, num_quantizers-1)
-
     # Compute individual losses
     semantic_loss = compute_semantic_loss(semantic_logits_shifted, semantic_targets_shifted, mask_shifted)
 
-    acoustic_loss = compute_acoustic_loss(audio_logits_shifted, acoustic_targets_shifted, mask_shifted, num_quantizers)
+    # Acoustic tokens are decoded within-frame (t), conditioned on c0_t and h_t,
+    # so no temporal shift is applied.
+    acoustic_loss = compute_acoustic_loss(audio_logits, acoustic_targets, mask, num_quantizers)
 
     # Compute weighted total loss
     total_loss = config.semantic_loss_weight * semantic_loss + config.acoustic_loss_weight * acoustic_loss

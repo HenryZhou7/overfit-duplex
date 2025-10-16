@@ -221,11 +221,16 @@ class MachOverfitModel(nn.Module):
         # Audio generation: from semantic tokens to acoustic tokens.
         ac_quantizers = self.num_quantizers - 1
 
-        # TODO: csm is actually contioning on the c0 token features.
+        # Embed assistant codes per quantizer, then project into decoder embed space.
         latent_quantizer_feats = self._embed_audio(codes_c2, collapse_quantizer_levels=False)  # [B, V, D, T]
         latent_quantizer_feats = rearrange(latent_quantizer_feats, "b v d t -> b t v d")
-        latent_quantizer_feats = self.audio_feat_embed(latent_quantizer_feats)  # [b t v embed_dim]
-        latent_quantizer_feats[:, :, 0, :] = backbone_h
+        latent_quantizer_feats = self.audio_feat_embed(latent_quantizer_feats)  # [b, t, v, embed_dim]
+
+        # Conditioning token at slot 0: combine last-layer hidden state h_t and c0 embedding.
+        # This lets the decoder attend to both h_t and the semantic token embedding.
+        c0_embed_proj = latent_quantizer_feats[:, :, 0, :]  # [b, t, embed_dim]
+        cond_token = backbone_h + c0_embed_proj  # [b, t, embed_dim]
+        latent_quantizer_feats[:, :, 0, :] = cond_token
         latent_quantizer_feats = rearrange(latent_quantizer_feats, "b t v d -> (b t) v d")
         # latent_quantizer_feats = self.audio_feat_proj(latent_quantizer_feats)
         # latent_quantizer_feats[:, :, 0, :] = backbone_h
@@ -286,12 +291,16 @@ class MachOverfitModel(nn.Module):
         c0_logits = self.c0_head(last_h)  # [bs, code_num]
         c0_sample = sample_topk(c0_logits, topk, temperature)  # [bs, 1]
 
-        # Step 3: Autoregressively generate acoustic tokens (c1..), using last_h as the first decoder token
+        # Step 3: Autoregressively generate acoustic tokens (c1..),
+        # conditioning on both h_t and the c0 embedding as the first decoder token.
         generated_codes = [c0_sample]
 
         # Decoder input sequence lives in the decoder embed space.
-        # Start with the semantic-conditioned state from the backbone, not the c0 embedding.
-        decoder_sequence_emb = [last_h.unsqueeze(1)]  # [bs, 1, embed_dim]
+        # First token is the fused conditioning token (h_t + embed(c0_t)).
+        c0_embed_code = self._embed_single_quantizer(c0_sample, 0)  # [bs, 1, code_dim]
+        c0_embed_proj = self.audio_feat_embed(c0_embed_code)  # [bs, 1, embed_dim]
+        cond_token = last_h.unsqueeze(1) + c0_embed_proj  # [bs, 1, embed_dim]
+        decoder_sequence_emb = [cond_token]
 
         # Generate acoustic tokens autoregressively
         for i in range(1, self.num_quantizers):
